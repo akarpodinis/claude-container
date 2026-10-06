@@ -1,5 +1,5 @@
 # Stage 1: Install AWS CLI v2 (keeps unzip out of the final image)
-FROM debian:bookworm-slim AS aws-builder
+FROM debian:trixie-slim AS aws-builder
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip \
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && /tmp/aws/install -i /usr/local/aws-cli -b /usr/local/bin
 
 # Stage 2: Runtime image
-FROM node:bookworm-slim
+FROM debian:trixie-slim
 
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -46,23 +46,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -ms /bin/bash dev && \
   usermod -aG sudo dev && \
   echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-  mkdir -p /home/dev/.config/gcloud /home/dev/.gemini /home/dev/.local/bin && \
-  chown -R dev:dev /home/dev/.config /home/dev/.gemini /home/dev/.local
+  mkdir -p /home/dev/.config /home/dev/.local/bin && \
+  chown -R dev:dev /home/dev/.config /home/dev/.local
 
-# Copy AWS CLI from builder stage
+# Copy AWS CLI from builder stage. The installer's /usr/local/bin entries are
+# symlinks; COPY would dereference them into standalone binaries that can't find
+# their bundled libpython, so recreate the symlinks here instead.
 COPY --from=aws-builder /usr/local/aws-cli /usr/local/aws-cli
-COPY --from=aws-builder /usr/local/bin/aws /usr/local/bin/aws
-COPY --from=aws-builder /usr/local/bin/aws_completer /usr/local/bin/aws_completer
+RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws && \
+    ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
 
 # Install Claude Code
 RUN sudo --preserve-env=PATH -u dev -H env HOME=/home/dev \
       bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
-
-# Install OpenAI Codex CLI
-RUN npm install -g @openai/codex
-
-# Install Google Gemini CLI
-RUN npm install -g @google/gemini-cli@latest
 
 # Install MCP Python package for pdb_mcp_server (separate layer for caching)
 RUN sudo --preserve-env=PATH,PIP_BREAK_SYSTEM_PACKAGES -u dev -H env HOME=/home/dev \

@@ -1014,6 +1014,40 @@ class TestRelayResponse:
         assert not close
 
     @pytest.mark.asyncio
+    async def test_head_without_length_headers(self):
+        # Docker answers HEAD /_ping with neither Content-Length
+        # nor Transfer-Encoding; the body must not be awaited.
+        resp = (
+            b'HTTP/1.1 200 OK\r\n'
+            b'Api-Version: 1.56\r\n'
+            b'\r\n'
+        )
+        reader = make_reader(resp)
+        writer = MockWriter()
+        status, close = await asyncio.wait_for(
+            proxy.relay_response(reader, writer, head=True),
+            timeout=1,
+        )
+        assert status == 200
+        assert not close
+        assert bytes(writer.data) == resp
+
+    @pytest.mark.asyncio
+    async def test_head_with_content_length(self):
+        resp = build_http_response(
+            200, body=b'',
+            headers={'Content-Length': '2'},
+        )
+        reader = make_reader(resp)
+        writer = MockWriter()
+        status, close = await asyncio.wait_for(
+            proxy.relay_response(reader, writer, head=True),
+            timeout=1,
+        )
+        assert status == 200
+        assert not close
+
+    @pytest.mark.asyncio
     async def test_204_connection_close(self):
         resp = (
             b'HTTP/1.1 204 No Content\r\n'
@@ -1181,6 +1215,21 @@ class TestProxyRequest:
             cr, cw, ur, uw,
         )
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_head_request_keeps_alive(self):
+        req = build_http_request('HEAD', '/_ping')
+        resp = (
+            b'HTTP/1.1 200 OK\r\n'
+            b'Api-Version: 1.56\r\n'
+            b'\r\n'
+        )
+        cr, cw, ur, uw = self._make_pair(req, resp)
+        result = await asyncio.wait_for(
+            proxy.proxy_request(cr, cw, ur, uw), timeout=1,
+        )
+        assert result is True
+        assert bytes(cw.data) == resp
 
     @pytest.mark.asyncio
     async def test_keep_alive(self):
@@ -1354,17 +1403,19 @@ class TestRunProxy:
 class TestMain:
 
     def test_main_starts_proxy(self):
-        with patch.object(proxy, 'run_proxy') as mock_rp:
-            mock_rp.return_value = asyncio.Future()
-            mock_rp.return_value.set_result(None)
+        # asyncio.run is patched below, so run_proxy's return value
+        # is never awaited; a plain sentinel avoids creating a Future
+        # outside an event loop (an error on Python >= 3.12).
+        with patch.object(proxy, 'run_proxy', return_value=None):
             with patch('asyncio.run') as mock_run:
                 proxy.main()
                 mock_run.assert_called_once()
 
     def test_log_level_from_env(self):
-        with patch.object(proxy, 'run_proxy') as mock_rp:
-            mock_rp.return_value = asyncio.Future()
-            mock_rp.return_value.set_result(None)
+        # asyncio.run is patched below, so run_proxy's return value
+        # is never awaited; a plain sentinel avoids creating a Future
+        # outside an event loop (an error on Python >= 3.12).
+        with patch.object(proxy, 'run_proxy', return_value=None):
             with patch('asyncio.run'), \
                  patch.dict(
                      os.environ, {'LOG_LEVEL': 'DEBUG'},
@@ -1376,9 +1427,10 @@ class TestMain:
         )
 
     def test_log_level_invalid_falls_back(self):
-        with patch.object(proxy, 'run_proxy') as mock_rp:
-            mock_rp.return_value = asyncio.Future()
-            mock_rp.return_value.set_result(None)
+        # asyncio.run is patched below, so run_proxy's return value
+        # is never awaited; a plain sentinel avoids creating a Future
+        # outside an event loop (an error on Python >= 3.12).
+        with patch.object(proxy, 'run_proxy', return_value=None):
             with patch('asyncio.run'), \
                  patch.dict(
                      os.environ,

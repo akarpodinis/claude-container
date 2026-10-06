@@ -16,10 +16,13 @@ test:
 install: build
 	mkdir -p "$(INSTALL_DIR)"
 	install -m 755 claude-container "$(INSTALL_DIR)/claude-container"
-	ln -f "$(INSTALL_DIR)/claude-container" "$(INSTALL_DIR)/codex-container"
-	ln -f "$(INSTALL_DIR)/claude-container" "$(INSTALL_DIR)/gemini-container"
 	@echo "$(PATH)" | tr ":" "\n" | grep -Fqx -e "$(INSTALL_DIR)" -e "$(INSTALL_DIR_DISPLAY)" || { \
-		echo "Add $(INSTALL_DIR_DISPLAY) to your PATH if you want to run these scripts by name."; \
+		if [ -t 1 ] && [ -z "$${NO_COLOR:-}" ] && [ "$$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then \
+			c="$$(tput bold)$$(tput setaf 3)"; r="$$(tput sgr0)"; \
+		else \
+			c=""; r=""; \
+		fi; \
+		printf '%sAdd %s to your PATH if you want to run claude-container by name.%s\n' "$$c" "$(INSTALL_DIR_DISPLAY)" "$$r"; \
 	}
 
 clean:

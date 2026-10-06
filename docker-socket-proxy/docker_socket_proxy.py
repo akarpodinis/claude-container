@@ -160,6 +160,7 @@ async def proxy_request(
             await forward_chunked(client_r, upstream_w)
     status, should_close = await relay_response(
         upstream_r, client_w,
+        head=req_line.startswith(b'HEAD '),
     )
     LOG.debug(
         'response: %d, close=%s', status, should_close,
@@ -174,8 +175,11 @@ async def proxy_request(
     return not should_close
 
 
-async def relay_response(upstream_r, client_w):
+async def relay_response(upstream_r, client_w, head=False):
     """Read one HTTP response and forward to the client.
+
+    ``head`` marks a response to a HEAD request, which has
+    no body regardless of Content-Length/Transfer-Encoding.
 
     Returns (status_code, should_close).
     """
@@ -189,7 +193,7 @@ async def relay_response(upstream_r, client_w):
     await client_w.drain()
     if status == 101:
         return 101, True
-    if (100 <= status < 200) or status in (204, 304):
+    if head or (100 <= status < 200) or status in (204, 304):
         conn = resp_hdrs.get('connection', '').lower()
         return status, conn == 'close'
     resp_cl = int(
