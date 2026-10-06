@@ -12,20 +12,22 @@ and Docker tooling pre-installed.
 - **Docker + Docker Compose** - Filtered Docker access via socket proxy
 - **GitHub CLI (`gh`)** - Create pull requests, manage issues, and interact with GitHub
 - **Python 3 + MCP** - Python debugging support with pre-configured Pdb MCP server
-- **Non-root execution** - Runs as unprivileged `dev` user for security
+- **Non-root execution** - Runs as unprivileged `dev` user with no sudo and all capabilities dropped
 - **Volume mounting** - Seamlessly access your host repositories
-- **Configuration persistence** - Your Claude and AWS configs are mounted from host
+- **Isolated Claude state** - Container sessions keep their own config under `~/.claude-container`, separate from your host `~/.claude`
+- **Sandbox self-test** - `claude-container sandbox-check` verifies the boundary from the inside
 
 ## Prerequisites
 
 - Docker installed on your host machine
 - (Optional) AWS credentials configured in `~/.aws/` for Bedrock usage
-- (Optional) Claude Code configuration in `~/.claude/` and `~/.claude.json`
-- (Optional) GitHub CLI authenticated via `gh auth login` or `CLAUDE_GITHUB_TOKEN` env var for PR/issue workflows
+- (Optional) `CLAUDE_GITHUB_TOKEN` env var or `gh auth login` for PR/issue workflows
 
 ## Quick Start
 
-Clone or download this repo, `cd` into it, and run `make install`. This installs `claude-container`, `codex-container`, and `gemini-container` into `~/.local/bin` as hard links to the same script, which auto-selects the right CLI. If `~/.local/bin` is not already on your `PATH`, the install step prints a reminder.
+Clone or download this repo, `cd` into it, and run `make install`. This builds the agent image and the proxy sidecar image, then installs `claude-container` into `~/.local/bin`. If `~/.local/bin` is not already on your `PATH`, the install step prints a reminder.
+
+Run `make test` to execute the proxy unit tests and then launch a real session that checks the sandbox boundary from the inside.
 
 ## Usage
 
@@ -35,8 +37,8 @@ Clone or download this repo, `cd` into it, and run `make install`. This installs
 # Launch Claude Code in current directory
 claude-container
 
-# Pass additional arguments to Claude
-claude-container --model opus
+# Pass additional arguments to Claude (default model is opus)
+claude-container --model sonnet
 
 # Show launcher help instead of CLI help
 claude-container --container-help
@@ -44,12 +46,20 @@ claude-container --container-help
 # Run arbitrary commands in the container
 claude-container bash
 claude-container aws s3 ls
+
+# Verify the sandbox boundary
+claude-container sandbox-check
 ```
 
 ### Authentication
 
-The launcher script mounts your Claude config and auth token directories, so you can
-just sign in to Claude Code on the host before starting the container.
+The container does **not** use your host `~/.claude` or `~/.claude.json`. It keeps
+its own state under `~/.claude-container/` (override with `CLAUDE_CONTAINER_HOME`).
+The first time you launch, sign in to Claude Code inside the container; the
+credentials persist in that directory for later sessions.
+
+Keeping the two separate means anything the agent writes to its own config
+(settings, hooks, memory) cannot affect Claude Code sessions on your host.
 
 ### Environment Variables
 
@@ -59,6 +69,12 @@ The launcher script passes through these environment variables from your host if
 - **`AWS_REGION`** - AWS region for API calls
 - **`CLAUDE_CODE_USE_BEDROCK`** - Set to `1` to use AWS Bedrock instead of Anthropic API
 - **`CLAUDE_GITHUB_TOKEN`** - GitHub personal access token for `gh` CLI (passed as `GITHUB_TOKEN` inside the container)
+
+Launcher settings:
+
+- **`CLAUDE_CONTAINER_HOME`** - Host directory for container-only Claude state (default `~/.claude-container`)
+- **`CLAUDE_CONTAINER_MEMORY`** - Memory limit for the agent container (default `8g`)
+- **`CLAUDE_CONTAINER_PIDS`** - Process limit for the agent container (default `4096`)
 
 Example:
 
@@ -82,26 +98,32 @@ AWS_PROFILE=prod AWS_REGION=us-east-1 CLAUDE_CODE_USE_BEDROCK=1 claude-container
 
 The `claude-container` script automatically mounts:
 
-| Host Path | Container Path | Purpose |
-|-----------|---------------|---------|
-| Current directory | Same path in container | Your working repository |
-| `~/.aws` | `/home/dev/.aws` | AWS credentials and config |
-| `~/.gitconfig` | `/home/dev/.gitconfig` | Git user identity and settings |
-| `~/.claude` | `/home/dev/.claude` | Claude Code settings |
-| `~/.claude.json` | `/home/dev/.claude.json` | Claude API key config |
-| `~/.config/gh` | `/home/dev/.config/gh` | GitHub CLI auth tokens |
-| `/var/run/docker.sock` | `/var/run/docker-real.sock` | Docker daemon (behind proxy) |
+| Host Path | Container Path | Mode | Purpose |
+|-----------|---------------|------|---------|
+| Current directory | Same path in container | rw | Your working repository |
+| `~/.claude-container/claude` | `/home/dev/.claude` | rw | Container-only Claude settings and credentials |
+| `~/.claude-container/claude.json` | `/home/dev/.claude.json` | rw | Container-only Claude config |
+| `~/.aws` | `/home/dev/.aws` | ro | AWS credentials and config |
+| `~/.gitconfig` | `/home/dev/.gitconfig` | ro | Git user identity and settings |
+| `~/.config/gh` | `/home/dev/.config/gh` | ro | GitHub CLI auth tokens |
+| per-session named volume | `/run/docker-proxy` | ro | Filtered Docker socket from the proxy sidecar |
+
+The real Docker socket is never mounted into the agent container. It is mounted only
+into the proxy sidecar (see below).
 
 ## Container Details
 
 - **Base Image**: `debian:trixie-slim`
-- **User**: `dev` (non-root with sudo access)
+- **User**: `dev` (non-root, no sudo; the image contains no path to root)
+- **Run flags**: `--cap-drop ALL --security-opt no-new-privileges --pids-limit --memory`
 - **Working Directory**: Mirrors your host's current directory
-- **Default Command**: `claude --dangerously-skip-permissions --model us.anthropic.claude-opus-4-6-v1`
+- **Default Command**: `claude --dangerously-skip-permissions --model opus`. The entrypoint prints a note when it applies this default; pass `--model <name>` to override it.
 
 ## Docker Socket Proxy
 
-The container includes a security proxy that sits between Claude and the Docker daemon. Instead of giving Claude unrestricted Docker access, the proxy intercepts Docker API requests and enforces the following restrictions:
+A separate proxy container sits between Claude and the Docker daemon. It is the only
+container that mounts the real socket. Instead of giving Claude unrestricted Docker
+access, the proxy intercepts Docker API requests and enforces the following restrictions:
 
 ### What's Blocked
 
@@ -125,10 +147,22 @@ The proxy passes `ALLOWED_MOUNT_BASE` (parent of cwd) and `ALLOWED_RW_BASE` (cwd
 
 ### How It Works
 
-1. The host Docker socket is mounted as `/var/run/docker-real.sock` (not the usual path)
-2. On container startup, the entrypoint locks down the real socket (`chmod 700`) so only root can access it
-3. A Python proxy starts in the background, listening on `/var/run/docker.sock`
-4. The `dev` user's Docker CLI talks to the proxy, which validates and forwards requests to the real daemon
+1. The launcher creates a per-session named volume and starts the proxy sidecar
+   (`claude-docker-proxy:latest`) with the host Docker socket mounted as
+   `/var/run/docker-real.sock` and the volume mounted at `/run/docker-proxy`
+2. The proxy listens on `/run/docker-proxy/docker.sock` inside that volume
+3. The agent container mounts the same volume read-only and has `DOCKER_HOST`
+   pointed at the proxy socket. It never sees the real socket, has no sudo, and
+   runs with all capabilities dropped, so there is no route around the proxy
+4. When the session ends the launcher removes the sidecar and the volume
+
+### What the proxy does not cover
+
+The proxy inspects container creation only. Other daemon operations pass through,
+so the agent can still interact with containers already running on your host
+daemon. Containers it creates are siblings of the agent container, not children.
+This is a deliberate tradeoff to keep Docker Compose workflows working; if you do
+not need Docker inside the session, the safest option is to not run the daemon.
 
 ## Troubleshooting
 
@@ -180,9 +214,16 @@ See GitHub docs for creating tokens: [Managing your personal access tokens](http
 
 For more on the GitHub CLI: [About GitHub CLI](https://docs.github.com/en/github-cli/github-cli/about-github-cli)
 
-### Claude Code not authenticating
+### Claude Code asks you to sign in again
 
-Run Claude Code once on your host to set up authentication, or manually place your API key in `~/.claude.json`:
+Container login state lives in `~/.claude-container/` on the host, not in your
+host `~/.claude`, so signing in on the host does nothing for the container.
+Sign in once inside the container and it persists across sessions and image
+rebuilds. You will be asked to sign in again only if that directory is removed
+or you point `CLAUDE_CONTAINER_HOME` somewhere new.
+
+To skip the interactive login, place an API key in
+`~/.claude-container/claude.json`:
 
 ```json
 {
@@ -192,7 +233,7 @@ Run Claude Code once on your host to set up authentication, or manually place yo
 
 ## Container Plugin
 
-The container includes a built-in plugin that provides additional subagents and MCP servers. This plugin **layers on top of** any configuration you have in your mounted `~/.claude/` directory without modifying it.
+The container includes a built-in plugin that provides additional subagents and MCP servers. This plugin **layers on top of** any configuration in the container's `~/.claude-container/claude/` directory without modifying it.
 
 ### How It Works
 

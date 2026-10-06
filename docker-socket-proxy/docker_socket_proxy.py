@@ -28,8 +28,10 @@ BLOCKED_CAPS = frozenset({
     'ALL', 'SYS_ADMIN', 'SYS_PTRACE', 'NET_ADMIN',
     'SYS_RAWIO', 'SYS_MODULE', 'DAC_READ_SEARCH',
 })
+# The daemon accepts both versioned (/v1.45/...) and
+# unversioned (/...) paths, so match either form.
 CREATE_RE = re.compile(
-    rb'^POST /v\d[^/]*/containers/create'
+    rb'^POST (?:/v\d[^/]*)?/containers/create'
 )
 MAX_BODY = 10 * 1024 * 1024
 BUF_SIZE = 65536

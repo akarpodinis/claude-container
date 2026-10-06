@@ -1121,6 +1121,29 @@ class TestProxyRequest:
         assert len(uw.data) == 0
 
     @pytest.mark.asyncio
+    async def test_rejected_create_unversioned_path(self):
+        """Unversioned API paths must be inspected too."""
+        body = {'HostConfig': {'Privileged': True}}
+        req = build_http_request(
+            'POST', '/containers/create', body,
+        )
+        resp = build_http_response(
+            200, body=b'unused',
+        )
+        cr, cw, ur, uw = self._make_pair(req, resp)
+        with patch.object(
+            proxy, 'ALLOWED_MOUNT_BASE', '/home',
+        ), patch.object(
+            proxy, 'ALLOWED_RW_BASE', '/home',
+        ):
+            result = await proxy.proxy_request(
+                cr, cw, ur, uw,
+            )
+        assert result is False
+        assert b'403 Forbidden' in bytes(cw.data)
+        assert len(uw.data) == 0
+
+    @pytest.mark.asyncio
     async def test_rejected_create_too_large(self):
         req = (
             b'POST /v1.45/containers/create HTTP/1.1\r\n'

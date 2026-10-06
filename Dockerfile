@@ -4,10 +4,11 @@ ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip \
   && set -eux \
-  && case "$TARGETARCH" in \
+  && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+  && case "$ARCH" in \
        amd64) AWS_ARCH="x86_64" ;; \
        arm64) AWS_ARCH="aarch64" ;; \
-       *) echo "Unsupported arch: $TARGETARCH" && exit 1 ;; \
+       *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
      esac \
   && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" \
        -o /tmp/awscliv2.zip \
@@ -24,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Install runtime packages, Docker CLI, and GitHub CLI, then remove build-only deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg lsb-release less sudo git \
+      ca-certificates curl gnupg lsb-release less git \
       python3 python3-pip python3-venv bubblewrap ripgrep \
   && mkdir -p /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -42,10 +43,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && apt-get purge -y --auto-remove gnupg lsb-release \
   && rm -rf /var/lib/apt/lists/*
 
-# Non-root user
+# Non-root user. No sudo, no sudoers entry: there is deliberately no path to
+# root inside this container.
 RUN useradd -ms /bin/bash dev && \
-  usermod -aG sudo dev && \
-  echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
   mkdir -p /home/dev/.config /home/dev/.local/bin && \
   chown -R dev:dev /home/dev/.config /home/dev/.local
 
@@ -56,28 +56,31 @@ COPY --from=aws-builder /usr/local/aws-cli /usr/local/aws-cli
 RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws && \
     ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
 
+# Strip setuid/setgid bits (su, mount, passwd, ...). The launcher also sets
+# no-new-privileges, so this is belt-and-braces: no binary can escalate.
+RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} +
+
+# Entrypoint and sandbox self-test (installed before dropping to dev)
+COPY start-claude /usr/local/bin/start-claude
+COPY sandbox-check /usr/local/bin/sandbox-check
+RUN chmod +x /usr/local/bin/start-claude /usr/local/bin/sandbox-check
+
+# Everything from here on runs as dev; the image never switches back to root.
+USER dev
+ENV HOME=/home/dev
+WORKDIR /work
+
 # Install Claude Code
-RUN sudo --preserve-env=PATH -u dev -H env HOME=/home/dev \
-      bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install MCP Python package for pdb_mcp_server (separate layer for caching)
-RUN sudo --preserve-env=PATH,PIP_BREAK_SYSTEM_PACKAGES -u dev -H env HOME=/home/dev \
-      python3 -m pip install --user --no-cache-dir mcp
-USER dev
-WORKDIR /work
+RUN python3 -m pip install --user --no-cache-dir mcp
 
 # Copy container plugin (subagents, MCP servers, and config)
 COPY --chown=dev:dev container-plugin /home/dev/container-plugin
 
-USER root
-WORKDIR /work
-
-# Docker socket proxy: filter privileged containers and restrict mounts
-COPY docker-socket-proxy/docker_socket_proxy.py /usr/local/bin/docker-socket-proxy
-RUN chmod +x /usr/local/bin/docker-socket-proxy
-
-# Entrypoint script: launch proxy, drop root privs
-COPY start-claude /usr/local/bin/start-claude
-RUN chmod +x /usr/local/bin/start-claude
+# The Docker CLI talks to the proxy sidecar through a shared volume; the real
+# daemon socket is never mounted into this container.
+ENV DOCKER_HOST=unix:///run/docker-proxy/docker.sock
 
 ENTRYPOINT ["/usr/local/bin/start-claude"]

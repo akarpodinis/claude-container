@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
+# Entrypoint for the agent container. Runs as the unprivileged `dev` user;
+# there is no root path inside this container.
 set -euo pipefail
 
-# sudo's secure_path drops /home/dev/.local/bin, so set PATH explicitly
-DEV_PATH="/home/dev/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-DEV_ENV=(sudo -E -u dev -H env HOME=/home/dev PATH="$DEV_PATH")
-
-REAL_SOCK=/var/run/docker-real.sock
-PROXY_SOCK=/var/run/docker.sock
-if [ -S "$REAL_SOCK" ]; then
-  chmod 700 "$REAL_SOCK"
-  python3 /usr/local/bin/docker-socket-proxy &
+# Wait briefly for the proxy sidecar to publish its socket.
+if [[ "${DOCKER_HOST:-}" == unix://* ]]; then
+  PROXY_SOCK="${DOCKER_HOST#unix://}"
   for _ in $(seq 1 50); do
     [ -S "$PROXY_SOCK" ] && break
     sleep 0.1
   done
+  if [ ! -S "$PROXY_SOCK" ]; then
+    echo "Warning: Docker proxy socket $PROXY_SOCK not found; docker commands will fail" >&2
+  fi
 fi
 
 # If first arg doesn't start with '-', run it as a command instead of claude
 if [ $# -gt 0 ] && [ "${1:0:1}" != "-" ]; then
-  exec "${DEV_ENV[@]}" "$@"
+  exec "$@"
 fi
 
 # Run claude with container plugin and --dangerously-skip-permissions
-# Default model can be overridden by --model in args
 CLAUDE_ARGS=(
   --plugin-dir /home/dev/container-plugin
   --dangerously-skip-permissions
@@ -36,14 +34,14 @@ fi
 
 HAS_MODEL=false
 for arg in "$@"; do
-  if [[ "$arg" == "--model" ]]; then
-    HAS_MODEL=true
-    break
-  fi
+  case "$arg" in
+    --model|--model=*) HAS_MODEL=true; break ;;
+  esac
 done
 
 if [ "$HAS_MODEL" = false ]; then
-  CLAUDE_ARGS+=(--model us.anthropic.claude-opus-4-6-v1)
+  echo "No --model given; defaulting to 'opus' (override with --model <name>)" >&2
+  CLAUDE_ARGS+=(--model opus)
 fi
 
-exec "${DEV_ENV[@]}" claude "${CLAUDE_ARGS[@]}" "$@"
+exec claude "${CLAUDE_ARGS[@]}" "$@"

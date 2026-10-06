@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Sandbox boundary self-test. Run inside the agent container via:
+#   claude-container sandbox-check
+# Exits non-zero if any boundary the launcher is supposed to enforce is missing.
+set -uo pipefail
+
+FAIL=0
+pass() { printf 'PASS  %s\n' "$1"; }
+fail() { printf 'FAIL  %s\n' "$1"; FAIL=1; }
+check() { # check <description> <command...>
+  local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
+}
+check_not() {
+  local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then fail "$desc"; else pass "$desc"; fi
+}
+expect_reject() { # expect_reject <description> <expected message> <docker args...>
+  local desc="$1" msg="$2"; shift 2
+  local out
+  out="$(docker "$@" 2>&1)"
+  if [[ "$out" == *"$msg"* ]]; then pass "$desc"; else fail "$desc ($out)"; fi
+}
+
+echo "== identity =="
+check     "running as non-root"            test "$(id -u)" -ne 0
+check_not "sudo is not installed"          command -v sudo
+check_not "su is not setuid"               test -u /bin/su
+
+echo "== kernel privileges =="
+check "no effective capabilities" \
+  grep -Eq '^CapEff:[[:space:]]+0+$' /proc/self/status
+check "no_new_privs is set" \
+  grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
+
+echo "== docker socket =="
+check_not "real docker socket is absent"   test -e /var/run/docker-real.sock
+check_not "default docker socket is absent" test -e /var/run/docker.sock
+check     "DOCKER_HOST points at proxy"    test "${DOCKER_HOST:-}" = "unix:///run/docker-proxy/docker.sock"
+check     "docker daemon reachable through proxy" docker version
+expect_reject "privileged create rejected" "privileged containers are not allowed" \
+  create --privileged nonexistent-image
+expect_reject "SYS_ADMIN capability rejected" "capabilities not allowed" \
+  create --cap-add SYS_ADMIN nonexistent-image
+expect_reject "host network rejected" "host network mode is not allowed" \
+  create --network host nonexistent-image
+expect_reject "host pid rejected" "host PID namespace is not allowed" \
+  create --pid host nonexistent-image
+expect_reject "mount outside tree rejected" "bind mount not allowed" \
+  create -v /etc:/mnt nonexistent-image
+expect_reject "sibling rw mount rejected" "bind mount must be read-only" \
+  create -v "$(dirname "$PWD")/zz-sibling:/mnt" nonexistent-image
+
+echo "== filesystem =="
+check "working directory is writable"      test -w "$PWD"
+check "home directory is writable"         test -w "$HOME"
+[ -d "$HOME/.aws" ]       && check_not "~/.aws is read-only"       touch "$HOME/.aws/.sandbox-check"
+[ -d "$HOME/.config/gh" ] && check_not "~/.config/gh is read-only" touch "$HOME/.config/gh/.sandbox-check"
+[ -f "$HOME/.gitconfig" ] && check_not "~/.gitconfig is read-only" bash -c ">> '$HOME/.gitconfig'"
+
+echo
+if [ "$FAIL" -eq 0 ]; then echo "All sandbox checks passed."; else echo "Some sandbox checks FAILED."; fi
+exit "$FAIL"

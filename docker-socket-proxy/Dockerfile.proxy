@@ -1,0 +1,12 @@
+# Runtime image for the Docker socket proxy sidecar.
+# The proxy is the only container that ever sees the real daemon socket;
+# the agent container talks to the proxy through a shared volume.
+FROM python:3.12-slim
+
+COPY docker_socket_proxy.py /usr/local/bin/docker-socket-proxy
+RUN chmod +x /usr/local/bin/docker-socket-proxy
+
+ENV DOCKER_PROXY_UPSTREAM=/var/run/docker-real.sock \
+    DOCKER_PROXY_LISTEN=/run/docker-proxy/docker.sock
+
+ENTRYPOINT ["python3", "/usr/local/bin/docker-socket-proxy"]

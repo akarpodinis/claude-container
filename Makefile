@@ -1,17 +1,29 @@
 IMAGE := claude-code-dev:latest
+PROXY_IMAGE := claude-docker-proxy:latest
 PROXY_TEST_IMAGE := docker-socket-proxy-test:latest
 PLATFORM ?= linux/$(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
 INSTALL_DIR_DISPLAY := ~/.local/bin
 INSTALL_DIR := $(HOME)/.local/bin
 
-.PHONY: build test install clean
+.PHONY: build test test-proxy test-sandbox install clean
 
 build:
 	docker build --platform $(PLATFORM) -t $(IMAGE) .
+	docker build --platform $(PLATFORM) -t $(PROXY_IMAGE) \
+		-f docker-socket-proxy/Dockerfile.proxy docker-socket-proxy
 
-test:
+# Unit tests for the proxy, then a live check of the assembled sandbox.
+test: test-proxy test-sandbox
+
+test-proxy:
 	docker build --platform $(PLATFORM) -t $(PROXY_TEST_IMAGE) docker-socket-proxy
 	docker run --rm $(PROXY_TEST_IMAGE)
+
+# Launches the real proxy + agent pair exactly as claude-container does and
+# asserts the boundary from inside: no root, no caps, no real socket, policy
+# enforced through the proxy.
+test-sandbox: build
+	./claude-container sandbox-check
 
 install: build
 	mkdir -p "$(INSTALL_DIR)"
@@ -27,4 +39,5 @@ install: build
 
 clean:
 	docker rmi $(IMAGE) 2>/dev/null || true
+	docker rmi $(PROXY_IMAGE) 2>/dev/null || true
 	docker rmi $(PROXY_TEST_IMAGE) 2>/dev/null || true
